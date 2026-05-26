@@ -1,4 +1,11 @@
 import { env } from '../env'
+import {
+  breakerEndpointKey,
+  detailsCache,
+  orthogonalBreaker,
+  searchCache,
+  stableCacheKey,
+} from './orthogonal-resilience'
 
 export type SearchApisResult = {
   results: Array<{
@@ -12,6 +19,8 @@ export type SearchApisResult = {
     price?: string
     verified?: boolean
   }>
+  /** Set when served from short TTL cache (search is free). */
+  cache_hit?: boolean
 }
 
 export type RunApiResult = {
@@ -32,6 +41,7 @@ export type DetailsResult = {
   bodyParams?: unknown
   queryParams?: unknown
   raw: unknown
+  cache_hit?: boolean
 }
 
 type OrthogonalSearchEndpoint = {
@@ -105,9 +115,14 @@ const baseHeaders = () => ({
   Authorization: `Bearer ${env.ORTHOGONAL_API_KEY}`,
 })
 
+// Hard cap so a slow/hung upstream can't pin a chat turn forever.
+const FETCH_TIMEOUT_MS = 30_000
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const t0 = Date.now()
   const url = `${env.ORTHOGONAL_API_BASE_URL}${path}`
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS)
   let res: Response
   try {
     res = await fetch(url, {
@@ -115,9 +130,13 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
       headers: baseHeaders(),
       body: JSON.stringify(body),
       cache: 'no-store',
+      signal: ac.signal,
     })
   } catch (err: unknown) {
-    const e = err as { message?: string; cause?: { code?: string; message?: string } }
+    const e = err as { name?: string; message?: string; cause?: { code?: string; message?: string } }
+    if (e.name === 'AbortError') {
+      throw new Error(`Orthogonal ${path} timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s`)
+    }
     const cause = e.cause
     const reason = cause?.message ?? e.message ?? 'network error'
     const code = cause?.code ? ` (${cause.code})` : ''
@@ -125,6 +144,8 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     throw new Error(
       `Orthogonal request failed for ${host}${path}${code}: ${reason}. Check ORTHOGONAL_API_BASE_URL and DNS/VPN access.`,
     )
+  } finally {
+    clearTimeout(timer)
   }
   if (!res.ok) {
     const text = await res.text().catch(() => '')
@@ -146,53 +167,76 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export const realOrthogonal = {
   async searchApis(query: string, limit = 5): Promise<SearchApisResult> {
-    try {
-      const response = await postJson<OrthogonalSearchResponse>('/v1/search', { prompt: query, limit })
-      if (response.success === false) {
-        throw new Error(`Orthogonal /v1/search failed: ${response.error ?? response.details ?? 'unknown error'}`)
+    const cacheKey = stableCacheKey('search', { query: query.trim().toLowerCase(), limit })
+    const cached = searchCache.get<SearchApisResult>(cacheKey)
+    if (cached) return { ...cached, cache_hit: true }
+
+    const result = await orthogonalBreaker.exec('orthogonal::search', async () => {
+      try {
+        const response = await postJson<OrthogonalSearchResponse>('/v1/search', { prompt: query, limit })
+        if (response.success === false) {
+          throw new Error(`Orthogonal /v1/search failed: ${response.error ?? response.details ?? 'unknown error'}`)
+        }
+        return { results: flattenSearchApis(response.results ?? [], limit), cache_hit: false }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        if (
+          message.includes('/v1/search returned 503') ||
+          message.toLowerCase().includes('semantic search unavailable')
+        ) {
+          const fallback = await fallbackSearchFromCatalog(query, limit)
+          return { ...fallback, cache_hit: false }
+        }
+        throw err
       }
-      return { results: flattenSearchApis(response.results ?? [], limit) }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
-      if (
-        message.includes('/v1/search returned 503') ||
-        message.toLowerCase().includes('semantic search unavailable')
-      ) {
-        return fallbackSearchFromCatalog(query, limit)
-      }
-      throw err
-    }
+    })
+
+    searchCache.set(cacheKey, result)
+    return result
   },
   async getDetails(api: string, path: string): Promise<DetailsResult> {
-    const response = await postJson<OrthogonalDetailsResponse>('/v1/details', { api, path })
-    if (response.success === false) {
-      throw new Error(
-        `Orthogonal /v1/details failed${response.code ? ` (${response.code})` : ''}: ${response.error ?? 'unknown error'}`,
-      )
-    }
+    const cacheKey = stableCacheKey('details', {
+      api: api.trim().toLowerCase(),
+      path: path.trim().replace(/\/+$/, '').toLowerCase(),
+    })
+    const cached = detailsCache.get<DetailsResult>(cacheKey)
+    if (cached) return { ...cached, cache_hit: true }
 
-    const details = response.data ?? {}
-    const endpoint = response.endpoint ?? {}
-    const apiMeta = response.api ?? {}
-    return {
-      api: String(details.api ?? apiMeta.slug ?? apiMeta.name ?? api),
-      path: String(details.path ?? endpoint.path ?? path),
-      method:
-        typeof details.method === 'string'
-          ? details.method
-          : typeof endpoint.method === 'string'
-            ? endpoint.method
-            : undefined,
-      description:
-        typeof details.description === 'string'
-          ? details.description
-          : typeof endpoint.description === 'string'
-            ? endpoint.description
-            : undefined,
-      bodyParams: details.bodyParams ?? endpoint.bodyParams,
-      queryParams: details.queryParams ?? endpoint.queryParams,
-      raw: response,
-    }
+    const result = await orthogonalBreaker.exec(breakerEndpointKey(api, path), async () => {
+      const response = await postJson<OrthogonalDetailsResponse>('/v1/details', { api, path })
+      if (response.success === false) {
+        throw new Error(
+          `Orthogonal /v1/details failed${response.code ? ` (${response.code})` : ''}: ${response.error ?? 'unknown error'}`,
+        )
+      }
+
+      const details = response.data ?? {}
+      const endpoint = response.endpoint ?? {}
+      const apiMeta = response.api ?? {}
+      return {
+        api: String(details.api ?? apiMeta.slug ?? apiMeta.name ?? api),
+        path: String(details.path ?? endpoint.path ?? path),
+        method:
+          typeof details.method === 'string'
+            ? details.method
+            : typeof endpoint.method === 'string'
+              ? endpoint.method
+              : undefined,
+        description:
+          typeof details.description === 'string'
+            ? details.description
+            : typeof endpoint.description === 'string'
+              ? endpoint.description
+              : undefined,
+        bodyParams: details.bodyParams ?? endpoint.bodyParams,
+        queryParams: details.queryParams ?? endpoint.queryParams,
+        raw: response,
+        cache_hit: false,
+      }
+    })
+
+    detailsCache.set(cacheKey, result)
+    return result
   },
   async runApi(
     api: string,
@@ -200,49 +244,65 @@ export const realOrthogonal = {
     body: Record<string, unknown> = {},
     query: Record<string, unknown> = {},
   ): Promise<RunApiResult> {
-    const t0 = Date.now()
-    const payload: {
-      api: string
-      path: string
-      body?: Record<string, unknown>
-      query?: Record<string, unknown>
-    } = { api, path }
-    if (Object.keys(body).length > 0) payload.body = body
-    if (Object.keys(query).length > 0) payload.query = query
-    const response = await postJson<OrthogonalRunResponse>('/v1/run', payload)
-    if (response.success === false) {
-      throw new Error(
-        `Orthogonal /v1/run failed${response.code ? ` (${response.code})` : ''}: ${response.error ?? 'unknown error'}`,
-      )
-    }
+    return orthogonalBreaker.exec(breakerEndpointKey(api, path), async () => {
+      const t0 = Date.now()
+      const payload: {
+        api: string
+        path: string
+        body?: Record<string, unknown>
+        query?: Record<string, unknown>
+      } = { api, path }
+      if (Object.keys(body).length > 0) payload.body = body
+      if (Object.keys(query).length > 0) payload.query = query
+      const response = await postJson<OrthogonalRunResponse>('/v1/run', payload)
+      if (response.success === false) {
+        throw new Error(
+          `Orthogonal /v1/run failed${response.code ? ` (${response.code})` : ''}: ${response.error ?? 'unknown error'}`,
+        )
+      }
 
-    const price =
-      typeof response.price === 'number'
-        ? response.price
-        : typeof response.price === 'string'
-          ? Number(response.price)
-          : typeof response.priceCents === 'number'
-            ? response.priceCents / 100
-            : 0
+      const price =
+        typeof response.price === 'number'
+          ? response.price
+          : typeof response.price === 'string'
+            ? Number(response.price)
+            : typeof response.priceCents === 'number'
+              ? response.priceCents / 100
+              : 0
 
-    return {
-      status: 200,
-      body: response.data ?? response,
-      latency_ms: Date.now() - t0,
-      cost_usd: Number.isFinite(price) ? price : 0,
-      cache_hit: false,
-      result_id: response.requestId,
-    }
+      return {
+        status: 200,
+        body: response.data ?? response,
+        latency_ms: Date.now() - t0,
+        cost_usd: Number.isFinite(price) ? price : 0,
+        cache_hit: false,
+        result_id: response.requestId,
+      }
+    })
   },
 }
 
 async function fallbackSearchFromCatalog(query: string, limit: number): Promise<SearchApisResult> {
   const url = `${env.ORTHOGONAL_API_BASE_URL}/v1/list-endpoints`
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${env.ORTHOGONAL_API_KEY}` },
-    cache: 'no-store',
-  })
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS)
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${env.ORTHOGONAL_API_KEY}` },
+      cache: 'no-store',
+      signal: ac.signal,
+    })
+  } catch (err: unknown) {
+    const e = err as { name?: string; message?: string }
+    if (e.name === 'AbortError') {
+      throw new Error(`Orthogonal /v1/list-endpoints timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s`)
+    }
+    throw new Error(`Orthogonal /v1/list-endpoints failed: ${e.message ?? 'network error'}`)
+  } finally {
+    clearTimeout(timer)
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`Orthogonal /v1/list-endpoints returned ${res.status}: ${text.slice(0, 200)}`)
@@ -321,11 +381,11 @@ function rankText(text: string, terms: string[]): number {
 export const fakeOrthogonal = {
   async searchApis(query: string, limit = 3): Promise<SearchApisResult> {
     await delay(300)
-    const all = [
-      { api_id: 'coingecko', name: 'CoinGecko', description: 'Crypto prices and market data (public, no key)', score: 0.92 },
-      { api_id: 'open-meteo', name: 'Open-Meteo', description: 'Free weather forecast API', score: 0.88 },
-      { api_id: 'libretranslate', name: 'LibreTranslate', description: 'Open-source text translation', score: 0.81 },
-      { api_id: 'restcountries', name: 'REST Countries', description: 'Country info by name/code', score: 0.78 },
+    const all: SearchApisResult['results'] = [
+      { api_id: 'coingecko', api: 'coingecko', name: 'CoinGecko', description: 'Crypto prices and market data (public, no key)', score: 0.92 },
+      { api_id: 'open-meteo', api: 'open-meteo', name: 'Open-Meteo', description: 'Free weather forecast API', score: 0.88 },
+      { api_id: 'libretranslate', api: 'libretranslate', name: 'LibreTranslate', description: 'Open-source text translation', score: 0.81 },
+      { api_id: 'restcountries', api: 'restcountries', name: 'REST Countries', description: 'Country info by name/code', score: 0.78 },
     ]
     const filtered = all.filter((a) =>
       `${a.name} ${a.description}`.toLowerCase().includes(query.toLowerCase().split(' ')[0] ?? ''),

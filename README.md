@@ -137,14 +137,15 @@ DATABASE_URL=<prod-neon-url> npm run db:migrate
 - Persistence (sessions, conversations, messages, tool_results)
 - Cost meter + hard token/budget cap
 - Optional rate limit (when Upstash configured)
+- Short TTL cache for `search_apis` / `get_details` (60s default, in-process)
+- Per-endpoint circuit breaker (fail fast after repeated 5xx/timeouts)
 - Vercel deploy
 
 **Deferred (post-MVP):**
 - `get_endpoint_details`, `fetch_full_result` tools
 - Conversation summarization cascade (tool digesting + rolling summary + hard floor)
 - Request coalescing (single-flight)
-- Circuit breaker per `api_id`
-- Cache TTL matrix
+- Redis-backed cache + circuit breaker (multi-instance)
 - Tool-card polish variants (coalesced badge, retry button, circuit-open card)
 - Cost breakdown popover, soft 70% warning banner
 - Conversation rename/delete UI, auto-titling via cheap model
@@ -161,7 +162,7 @@ See `../docs/pre-dev/orthogonal-chat/` for the full PRD, design validation, feat
 | Limitation | Workaround |
 |-----------|------------|
 | No coalescing | Don't fire concurrent identical calls |
-| No circuit breaker | Upstream errors surface in tool cards; user retries |
+| In-process cache/breaker only | Per Vercel instance; Redis for multi-instance prod |
 | No summarization | Keep demo conversations short (<20 turns) |
 | Tool errors no retry button | User resends prompt |
 | Sidebar list is read-only (no delete/rename UI) | Manual DB op if needed |

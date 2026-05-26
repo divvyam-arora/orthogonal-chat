@@ -3,6 +3,7 @@
 import type { UIMessage } from 'ai'
 import ReactMarkdown from 'react-markdown'
 import { ToolCard } from './tool-card'
+import { MessageContinuity } from './message-continuity'
 
 export function MessageAssistant({ m }: { m: UIMessage }) {
   const parts = m.parts ?? []
@@ -10,6 +11,11 @@ export function MessageAssistant({ m }: { m: UIMessage }) {
     <div className="flex flex-col gap-3">
       {parts.map((p, i) => {
         const type = p.type as string
+        if (type === 'context-continuity') {
+          const text = (p as { text?: string }).text ?? ''
+          if (!text) return null
+          return <MessageContinuity key={i} text={text} />
+        }
         if (type === 'text') {
           const text = (p as { text?: string }).text ?? ''
           if (!text) return null

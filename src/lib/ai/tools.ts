@@ -1,6 +1,13 @@
 import { tool } from 'ai'
 import { z } from 'zod'
 import { orthogonal } from './orthogonal'
+import { CircuitOpenError } from './orthogonal-resilience'
+import {
+  buildEndpointSpec,
+  buildOrchestrationHint,
+  validateRunInputs,
+  type EndpointSpec,
+} from './orchestration'
 
 export type ToolExecMeta = {
   latencyMs: number
@@ -9,40 +16,64 @@ export type ToolExecMeta = {
 }
 
 // We attach a per-call metadata side-channel via the tool result envelope so the UI can render it.
-export const buildTools = () => {
+export const buildTools = (opts?: {
+  inspectedEndpoints?: Iterable<[string, string]>
+  endpointSpecs?: Iterable<EndpointSpec>
+}) => {
+  // Tolerant key: case-insensitive, ignore trailing slash. Prevents redundant get_details
+  // calls when the model alternates between e.g. "/Search" and "/search/".
+  const endpointKey = (api: string, path: string) =>
+    `${api.trim().toLowerCase()}::${path.trim().replace(/\/+$/, '').toLowerCase()}`
   const inspectedEndpoints = new Set<string>()
-  const endpointKey = (api: string, path: string) => `${api.trim().toLowerCase()}::${path.trim()}`
+  const endpointSpecs = new Map<string, EndpointSpec>()
+  if (opts?.inspectedEndpoints) {
+    for (const [api, path] of opts.inspectedEndpoints) {
+      if (api && path) inspectedEndpoints.add(endpointKey(api, path))
+    }
+  }
+  if (opts?.endpointSpecs) {
+    for (const spec of opts.endpointSpecs) {
+      endpointSpecs.set(endpointKey(spec.api, spec.path), spec)
+    }
+  }
 
   return {
     search_apis: tool({
-    description: 'Search the Orthogonal API catalog by natural-language query. Use first to find a relevant API.',
-    inputSchema: z.object({
-      query: z.string().min(1).describe('Natural-language description of what the user wants to do'),
-      limit: z.number().int().min(1).max(10).optional(),
-    }),
-    execute: async ({ query, limit }) => {
-      const t0 = Date.now()
-      try {
-        const out = await orthogonal.searchApis(query, limit)
-        return {
-          ok: true,
-          results: out.results,
-          _meta: { latencyMs: Date.now() - t0, costUsd: 0, cacheHit: false },
+      description:
+        'Search the Orthogonal API catalog (free). Start with ONE query matching the user goal. ' +
+        'Call again only if no suitable api/path appears in the top results.',
+      inputSchema: z.object({
+        query: z.string().min(1).describe('Natural-language description of the capability to find'),
+        limit: z.number().int().min(1).max(8).optional(),
+      }),
+      execute: async ({ query, limit }) => {
+        const t0 = Date.now()
+        const capped = Math.min(limit ?? 6, 6)
+        try {
+          const out = await orthogonal.searchApis(query, capped)
+          return {
+            ok: true,
+            results: out.results,
+            _meta: { latencyMs: Date.now() - t0, costUsd: 0, cacheHit: !!out.cache_hit },
+          }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : 'unknown error'
+          return {
+            ok: false,
+            error: {
+              message,
+              code: err instanceof CircuitOpenError ? 'circuit_open' : undefined,
+            },
+            _meta: { latencyMs: Date.now() - t0, costUsd: 0, cacheHit: false },
+          }
         }
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'unknown error'
-        return {
-          ok: false,
-          error: { message },
-          _meta: { latencyMs: Date.now() - t0, costUsd: 0, cacheHit: false },
-        }
-      }
-    },
+      },
     }),
 
     get_details: tool({
       description:
-        'Get required/optional parameters for an endpoint before calling run_api. Use after search_apis and before run_api.',
+        'Get required/optional parameters for an endpoint before calling run_api. Required before run_api. ' +
+        'Read orchestration.requiredFields — decide if user input is enough or a web-search step is needed first.',
       inputSchema: z.object({
         api: z.string().min(1).describe('API slug from search_apis, e.g. "sixtyfour"'),
         path: z.string().min(1).describe('Endpoint path from search_apis, e.g. "/enrich-lead"'),
@@ -51,7 +82,11 @@ export const buildTools = () => {
         const t0 = Date.now()
         try {
           const out = await orthogonal.getDetails(api, path)
-          inspectedEndpoints.add(endpointKey(out.api, out.path))
+          const key = endpointKey(out.api, out.path)
+          inspectedEndpoints.add(key)
+          const spec = buildEndpointSpec(out.api, out.path, out.bodyParams, out.queryParams)
+          endpointSpecs.set(key, spec)
+          const orchestration = buildOrchestrationHint(spec)
           return {
             ok: true,
             api: out.api,
@@ -60,14 +95,17 @@ export const buildTools = () => {
             description: out.description,
             bodyParams: out.bodyParams,
             queryParams: out.queryParams,
-            details: out.raw,
-            _meta: { latencyMs: Date.now() - t0, costUsd: 0, cacheHit: false },
+            orchestration,
+            _meta: { latencyMs: Date.now() - t0, costUsd: 0, cacheHit: !!out.cache_hit },
           }
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : 'unknown error'
           return {
             ok: false,
-            error: { message },
+            error: {
+              message,
+              code: err instanceof CircuitOpenError ? 'circuit_open' : undefined,
+            },
             _meta: { latencyMs: Date.now() - t0, costUsd: 0, cacheHit: false },
           }
         }
@@ -76,7 +114,8 @@ export const buildTools = () => {
 
     run_api: tool({
       description:
-        'Execute a request against an API discovered via search_apis. Prefer using get_details first. Supports body and query params.',
+        'Execute a request against an API. Requires get_details first. ' +
+        'If blocked for missing/suspicious inputs, follow suggestedNextSteps (often a simpler API answers the question).',
       inputSchema: z.object({
         api: z.string().min(1).optional(),
         path: z.string().min(1).optional(),
@@ -103,6 +142,25 @@ export const buildTools = () => {
               `run_api blocked: call get_details first for api="${apiName}" path="${apiPath}", then retry with required body/query fields.`,
             )
           }
+
+          const spec = endpointSpecs.get(key)
+          if (spec) {
+            const validation = validateRunInputs(spec, apiBody, apiQuery)
+            if (!validation.ok) {
+              return {
+                ok: false,
+                error: {
+                  code: validation.code,
+                  message: validation.message,
+                  missingFields: validation.missingFields,
+                  suspiciousFields: validation.suspiciousFields,
+                  suggestedNextSteps: validation.suggestedNextSteps,
+                },
+                _meta: { latencyMs: Date.now() - t0, costUsd: 0, cacheHit: false },
+              }
+            }
+          }
+
           const out = await orthogonal.runApi(apiName, apiPath, apiBody, apiQuery)
           return {
             ok: true,
@@ -118,7 +176,10 @@ export const buildTools = () => {
           const message = err instanceof Error ? err.message : 'unknown error'
           return {
             ok: false,
-            error: { message },
+            error: {
+              message,
+              code: err instanceof CircuitOpenError ? 'circuit_open' : undefined,
+            },
             _meta: { latencyMs: Date.now() - t0, costUsd: 0, cacheHit: false },
           }
         }

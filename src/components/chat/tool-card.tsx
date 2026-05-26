@@ -24,7 +24,11 @@ function readError(output: unknown): string | null {
   const o = output as Record<string, unknown>
   if (o.ok === false && o.error && typeof o.error === 'object') {
     const e = o.error as Record<string, unknown>
-    return typeof e.message === 'string' ? e.message : 'error'
+    const msg = typeof e.message === 'string' ? e.message : 'error'
+    const steps = Array.isArray(e.suggestedNextSteps)
+      ? (e.suggestedNextSteps as string[]).map((s, i) => `${i + 1}. ${s}`).join('\n')
+      : ''
+    return steps ? `${msg}\n\nNext steps:\n${steps}` : msg
   }
   return null
 }

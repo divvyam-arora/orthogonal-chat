@@ -2,7 +2,7 @@
 
 A chat app where you ask for data — Bitcoin prices, weather, company info, contacts, web results — and the assistant figures out which API in the **[Orthogonal](https://orthogonal.com)** catalog can answer, calls it, and replies in natural language.
 
-> **Live demo:** [orthogonal-chat-seven.vercel.app](https://orthogonal-chat-seven.vercel.app) — sign in with GitHub, ask anything.
+> **Live link:** [orthogonal-chat-five.vercel.app](https://orthogonal-chat-five.vercel.app) — sign in with GitHub, ask anything.
 
 <!-- SCREENSHOT: full chat UI with a completed turn showing tool cards + assistant reply -->
 <img src="docs/screenshots/hero.png" alt="Main chat UI" width="100%" />

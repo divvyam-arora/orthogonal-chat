@@ -10,9 +10,9 @@ import { Composer } from './composer'
 import { fetchJson, isBenignFetchError, errorMessageFromFetch } from '@/lib/fetch-json'
 
 const EXAMPLES = [
-  'Find an API for the current Bitcoin price',
-  'Get the weather in Tokyo right now',
-  'What APIs exist for translating text?',
+  'Price of Bitcoin',
+  'How much funding has Tesla gotten till date?',
+  'Tell me the precipitation data in SF today',
 ]
 
 const ACTIVE_CONVO_KEY = 'orthchat:activeConversationId'

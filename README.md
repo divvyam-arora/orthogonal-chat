@@ -9,9 +9,9 @@ A chat app where you ask for data — Bitcoin prices, weather, company info, con
 
 Three example prompts that exercise the whole pipeline:
 
-- *"Find an API for the current Bitcoin price."*
-- *"Get the weather in Tokyo right now."*
-- *"What APIs exist for translating text?"*
+- *"Price of Bitcoin"*
+- *"How much funding has Tesla gotten till date?"*
+- *"Tell me the precipitation data in SF today"*
 
 ---
 
@@ -200,7 +200,7 @@ Every assistant turn:
 
 ## Setup (local, ~5 min)
 
-You'll need a Neon Postgres database, a GitHub OAuth app, an Anthropic key, and an Orthogonal key (or the fake client for an offline demo).
+You'll need a Neon Postgres database, a GitHub OAuth app, an Anthropic key, and an Orthogonal key.
 
 ```bash
 # 1. Install
@@ -226,10 +226,6 @@ npm run dev
 ```
 
 Open `http://localhost:3000`, sign in with GitHub, send a chat.
-
-### Offline demo (no Orthogonal key)
-
-Set `ORTHOGONAL_FAKE=true`. The bundled fake client returns canned data for CoinGecko, Open-Meteo, LibreTranslate, and REST Countries.
 
 ---
 

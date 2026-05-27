@@ -7,7 +7,7 @@ A chat app where you ask for data — Bitcoin prices, weather, company info, con
 <!-- SCREENSHOT: full chat UI with a completed turn showing tool cards + assistant reply -->
 <img src="docs/screenshots/hero.png" alt="Main chat UI" width="100%" />
 
-Three example prompts that exercise the whole pipeline:
+A few examples:
 
 - *"Price of Bitcoin"*
 - *"How much funding has Tesla gotten till date?"*

@@ -3,7 +3,7 @@ import { anthropic } from '@ai-sdk/anthropic'
 import { env } from '@/lib/env'
 import { calcCost } from '@/lib/pricing'
 import {
-  bumpSessionTotals,
+  bumpUserTotals,
   createContinuedConversation,
   getConversation,
   listMessages,
@@ -108,10 +108,10 @@ export async function summarizeForContinuation(rows: DbMessage[]): Promise<{
  * new conversation carrying that summary as the first message.
  */
 export async function rotateConversationIfNeeded(
-  sessionId: string,
+  userId: string,
   conversationId: string,
 ): Promise<{ conversationId: string; rotated: boolean; continuedFromId?: string }> {
-  const conv = await getConversation(sessionId, conversationId)
+  const conv = await getConversation(userId, conversationId)
   if (!conv) return { conversationId, rotated: false }
 
   let used = conv.totalTokens ?? 0
@@ -128,11 +128,11 @@ export async function rotateConversationIfNeeded(
   }
 
   const { summary, inputTokens, outputTokens, costUsd } = await summarizeForContinuation(rows)
-  await bumpSessionTotals(sessionId, costUsd, inputTokens + outputTokens)
+  await bumpUserTotals(userId, costUsd, inputTokens + outputTokens)
 
   const oldTitle = conv.title?.trim() || 'Chat'
   const newConv = await createContinuedConversation({
-    sessionId,
+    userId,
     continuedFromConversationId: conversationId,
     title: `Continued: ${oldTitle}`.slice(0, 60),
     summary,

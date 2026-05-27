@@ -4,10 +4,10 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useChat } from '@ai-sdk/react'
 import { DefaultChatTransport } from 'ai'
 import { Sidebar } from './sidebar'
-import { HeaderCost } from './header-cost'
+import { HeaderCost, type Totals } from './header-cost'
 import { MessageList } from './message-list'
 import { Composer } from './composer'
-import { fetchJson, isBenignFetchError } from '@/lib/fetch-json'
+import { fetchJson, isBenignFetchError, errorMessageFromFetch } from '@/lib/fetch-json'
 
 const EXAMPLES = [
   'Find an API for the current Bitcoin price',
@@ -27,10 +27,19 @@ function restoreMessages(
   }))
 }
 
-export function AppShell() {
+export type AppShellUser = {
+  name: string | null
+  email: string | null
+  image: string | null
+}
+
+export function AppShell({ user }: { user: AppShellUser }) {
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const [rotationNotice, setRotationNotice] = useState<string | null>(null)
+  const [bootError, setBootError] = useState<string | null>(null)
+  const [conversationLoadError, setConversationLoadError] = useState<string | null>(null)
+  const [budgetCapped, setBudgetCapped] = useState(false)
   const conversationIdRef = useRef<string | null>(null)
   const pendingRotationReloadRef = useRef(false)
 
@@ -123,6 +132,7 @@ export function AppShell() {
       conversationIdRef.current = id
       setConversationId(id)
       setRotationNotice(null)
+      setConversationLoadError(null)
       try {
         if (typeof window !== 'undefined') {
           if (id) window.localStorage.setItem(ACTIVE_CONVO_KEY, id)
@@ -135,7 +145,12 @@ export function AppShell() {
         try {
           await loadConversationMessages(id)
         } catch (e) {
-          console.error('load conversation failed', e)
+          if (!isBenignFetchError(e)) console.error('load conversation failed', e)
+          if (!isBenignFetchError(e)) {
+            setConversationLoadError(
+              errorMessageFromFetch(e) || "Could not load this chat's messages",
+            )
+          }
         }
       } else {
         setMessages([])
@@ -154,8 +169,10 @@ export function AppShell() {
           cache: 'no-store',
           signal: ac.signal,
         })
+        if (!active) return
+        setBootError(null)
         const list = data.conversations ?? []
-        if (!active || list.length === 0 || conversationId) return
+        if (list.length === 0 || conversationId) return
 
         let target: string | null = null
         try {
@@ -171,6 +188,9 @@ export function AppShell() {
         handleSelectConversation(target)
       } catch (e) {
         if (!isBenignFetchError(e)) console.error('initial load failed', e)
+        if (active && !isBenignFetchError(e)) {
+          setBootError(errorMessageFromFetch(e) || 'Could not load your chats')
+        }
       }
     })()
     return () => {
@@ -226,11 +246,32 @@ export function AppShell() {
       />
       <main className="flex h-dvh min-h-0 flex-col overflow-hidden">
         <div className="shrink-0">
-          <HeaderCost refreshKey={refreshKey} conversationId={conversationId} />
+          <HeaderCost
+            refreshKey={refreshKey}
+            conversationId={conversationId}
+            user={user}
+            onTotalsChange={(t: Totals) => setBudgetCapped(t.cap > 0 && t.totalCostUsd >= t.cap)}
+          />
         </div>
         {rotationNotice ? (
           <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-950 dark:text-amber-100">
             {rotationNotice}
+          </div>
+        ) : null}
+        {bootError ? (
+          <div
+            className="shrink-0 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-700 dark:text-red-300"
+            role="alert"
+          >
+            {bootError}
+          </div>
+        ) : null}
+        {conversationLoadError ? (
+          <div
+            className="shrink-0 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-700 dark:text-red-300"
+            role="alert"
+          >
+            {conversationLoadError}
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-hidden">
@@ -246,7 +287,12 @@ export function AppShell() {
           </div>
         ) : null}
         <div className="shrink-0">
-          <Composer onSend={handleSend} disabled={false} isStreaming={isStreaming} onStop={stop} />
+          <Composer
+            onSend={handleSend}
+            disabled={budgetCapped}
+            isStreaming={isStreaming}
+            onStop={stop}
+          />
         </div>
       </main>
     </div>
@@ -273,10 +319,24 @@ function EmptyState({ onPick }: { onPick: (s: string) => void }) {
   )
 }
 
+function formatChatErrorMessage(error: Error): string {
+  const raw = error.message?.trim()
+  if (!raw) return 'Something went wrong.'
+  try {
+    const parsed = JSON.parse(raw) as { message?: string }
+    if (typeof parsed.message === 'string' && parsed.message.trim()) {
+      return parsed.message.trim()
+    }
+  } catch {
+    // not JSON — show raw (e.g. HTTP errors with text bodies)
+  }
+  return raw
+}
+
 function ErrorBanner({ error }: { error: Error }) {
   return (
     <div className="border-t border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-700 dark:text-red-300">
-      {error.message || 'Something went wrong.'}
+      {formatChatErrorMessage(error)}
     </div>
   )
 }

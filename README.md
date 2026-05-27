@@ -4,10 +4,10 @@ Anonymous AI chat that lets users discover and call any API in the Orthogonal ca
 
 - **Frontend & backend:** Next.js 16 App Router (Node runtime, Fluid Compute on Vercel)
 - **AI:** Anthropic Claude via Vercel AI SDK
-- **Tools:** `search_apis`, `run_api` (Orthogonal upstream)
-- **Persistence:** Postgres (Neon) + Drizzle ORM
+- **Tools:** `search_apis`, `get_details`, `run_api` (Orthogonal upstream)
+- **Persistence:** Postgres (Neon) + Drizzle ORM, keyed by GitHub user id
+- **Auth:** NextAuth v5 (Auth.js) — GitHub OAuth, JWT sessions
 - **Cache / rate-limit:** Upstash Redis (optional)
-- **Sessions:** Anonymous, sealed cookie (iron-session)
 
 This is the **1-day MVP build**. See `../docs/pre-dev/orthogonal-chat/mvp-1day-plan.md` for the deferred items.
 
@@ -16,25 +16,34 @@ This is the **1-day MVP build**. See `../docs/pre-dev/orthogonal-chat/mvp-1day-p
 ## 1. Quick start (local)
 
 ```bash
-# 1. Install deps (already done if you ran create-next-app)
+# 1. Install deps
 npm install
 
 # 2. Provision a Neon Postgres database
 #    https://console.neon.tech → new project → copy the connection string
 #    Then fill DATABASE_URL in .env.local
 
-# 3. Set required env vars in .env.local
-#    SESSION_SECRET   — 32+ random chars (run: openssl rand -base64 32)
-#    ANTHROPIC_API_KEY — from console.anthropic.com
-#    ORTHOGONAL_API_KEY — from orthogonal.dev (or leave + set ORTHOGONAL_FAKE=true)
-#    UPSTASH_REDIS_REST_URL / TOKEN — optional, rate-limiting only
+# 3. Create a GitHub OAuth app (used for sign-in)
+#    https://github.com/settings/developers → New OAuth App
+#    Homepage URL:                http://localhost:3000
+#    Authorization callback URL:  http://localhost:3000/api/auth/callback/github
+#    Copy Client ID -> AUTH_GITHUB_ID
+#    Generate a new client secret -> AUTH_GITHUB_SECRET
 
-# 4. Run database migrations
+# 4. Fill .env.local
+#    DATABASE_URL          — Neon connection string
+#    AUTH_SECRET           — 32+ random chars (run: openssl rand -base64 32)
+#    AUTH_GITHUB_ID        — from step 3
+#    AUTH_GITHUB_SECRET    — from step 3
+#    ANTHROPIC_API_KEY     — from console.anthropic.com
+#    ORTHOGONAL_API_KEY    — from orthogonal.dev (or set ORTHOGONAL_FAKE=true)
+
+# 5. Run database migrations
 npm run db:migrate
 
-# 5. Start dev server
+# 6. Start dev server
 npm run dev
-# open http://localhost:3000
+# open http://localhost:3000 → sign in with GitHub
 ```
 
 ### Run without Orthogonal credentials
@@ -48,7 +57,10 @@ Set `ORTHOGONAL_FAKE=true` in `.env.local`. The fake client returns canned data 
 | Var | Required | Purpose |
 |-----|----------|---------|
 | `DATABASE_URL` | yes | Neon Postgres connection string |
-| `SESSION_SECRET` | yes | 32+ chars; used to seal session cookies |
+| `AUTH_SECRET` | yes | 32+ chars; signs JWT session cookies (`openssl rand -base64 32`) |
+| `AUTH_GITHUB_ID` | yes | GitHub OAuth app Client ID |
+| `AUTH_GITHUB_SECRET` | yes | GitHub OAuth app Client Secret |
+| `AUTH_TRUST_HOST` | yes (Vercel) | Set to `true` when deployed behind a proxy |
 | `ANTHROPIC_API_KEY` | yes | Claude API key |
 | `ORTHOGONAL_API_KEY` | yes | Orthogonal upstream API key |
 | `ORTHOGONAL_API_BASE_URL` | yes | Default `https://api.orthogonal.com` |
@@ -98,14 +110,16 @@ drizzle/
 # Either: connect this repo via the Vercel dashboard → import
 # Or: from this directory
 npx vercel
-# Follow prompts; add env vars in the dashboard before promoting to production
 ```
 
 **Required Vercel settings:**
 
-- Plan: **Pro** (Hobby's 60-second function timeout is insufficient for AI tool chains)
-- Fluid Compute: enabled (default on new projects in 2026)
-- Environment variables: all from §2 above
+- Plan: **Pro** if you want full multi-tool replies (Hobby's 60s cap can kill long chains). On Hobby, drop `maxDuration` in `src/app/api/chat/route.ts` to `60`.
+- Fluid Compute: enabled (default on new projects in 2026).
+- Environment variables: all from §2 above. **Don't forget `AUTH_TRUST_HOST=true`** so Auth.js trusts the Vercel proxy.
+- Add a **second** GitHub OAuth app (or extend the existing one) with the production callback:
+  - Homepage URL: `https://<your-app>.vercel.app`
+  - Callback URL: `https://<your-app>.vercel.app/api/auth/callback/github`
 
 **After first deploy, run migrations once against the prod DB:**
 
@@ -113,17 +127,20 @@ npx vercel
 DATABASE_URL=<prod-neon-url> npm run db:migrate
 ```
 
+**History "empty"?** It's keyed to the signed-in GitHub user id (stable, survives cookie clears and device changes). Sign in with the same GitHub account and your chats come back. If a row's `user_id` doesn't match yours, the app correctly hides it.
+
 ---
 
 ## 5. Verification (smoke test)
 
-1. Visit `/` in a private window → cookie set silently, empty state with 3 example prompts.
-2. Click *"Find an API for current Bitcoin price"* → tool card appears for `search_apis` → tool card appears for `run_api` → assistant streams a price.
-3. Header meter shows non-zero `$x.xxx / $0.50`.
-4. Reload → conversation in sidebar, click to reload → history restored.
-5. Click **+ New chat** → empty thread.
-6. (If Upstash configured) Spam 21+ messages in 5 min → 429 surfaced in UI.
-7. (Override) Set `BUDGET_USD_PER_SESSION=0.001` → composer disables after first reply.
+1. Visit `/` in a private window → "Sign in with GitHub" screen.
+2. Sign in → empty state with 3 example prompts and your name/avatar in the header.
+3. Click *"Find an API for current Bitcoin price"* → tool card for `search_apis` → tool card for `run_api` → assistant streams a price.
+4. Header meter shows non-zero `$x.xxx / $0.50`.
+5. Reload → conversation in sidebar, click to reload → history restored.
+6. Click **+ New chat** → empty thread. Click **Sign out** → back to sign-in screen. Sign in again → previous chats reappear.
+7. (If Upstash configured) Spam 21+ messages in 5 min → 429 surfaced in UI.
+8. (Override) Set `BUDGET_USD_PER_SESSION=0.001` → composer disables after first reply.
 
 ---
 

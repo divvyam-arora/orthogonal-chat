@@ -1,11 +1,10 @@
 import { NextResponse } from 'next/server'
 import { streamText, convertToModelMessages } from 'ai'
 import { anthropic } from '@ai-sdk/anthropic'
-import { getOrCreateSessionId } from '@/lib/session'
+import { requireUserId, UnauthenticatedError } from '@/lib/current-user'
 import {
-  upsertSession,
-  getSessionTotals,
-  bumpSessionTotals,
+  getUserTotals,
+  bumpUserTotals,
   bumpConversationTokens,
   createConversation,
   getConversation,
@@ -31,7 +30,8 @@ import {
 } from '@/lib/ai/history'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+// Hobby caps Node functions at 60s — keep this at 60 for safety; bump to 300 on Vercel Pro.
+export const maxDuration = 60
 
 const SYSTEM_PROMPT = `You are Orthogonal Chat, an assistant that helps users discover and call third-party APIs.
 
@@ -98,13 +98,36 @@ type ChatBody = {
 }
 
 export async function POST(req: Request) {
-  const sessionId = await getOrCreateSessionId()
-  await upsertSession(sessionId)
+  try {
+    return await handleChatPost(req)
+  } catch (err) {
+    if (err instanceof UnauthenticatedError) {
+      return NextResponse.json({ error: 'unauthenticated' }, { status: 401 })
+    }
+    console.error('[api/chat] POST error:', err)
+    const message =
+      err instanceof Error
+        ? err.message
+        : typeof err === 'string'
+          ? err
+          : 'unknown_error'
+    return NextResponse.json(
+      {
+        error: 'chat_failed',
+        message: message.trim() || 'Server error — check Vercel function logs for this request.',
+      },
+      { status: 500 },
+    )
+  }
+}
+
+async function handleChatPost(req: Request) {
+  const userId = await requireUserId()
 
   // Optional rate limit (only when Upstash configured).
   const rl = getRatelimit()
   if (rl) {
-    const { success, reset } = await rl.limit(`chat:session:${sessionId}`)
+    const { success, reset } = await rl.limit(`chat:user:${userId}`)
     if (!success) {
       const retryAfter = Math.max(1, Math.ceil((reset - Date.now()) / 1000))
       return NextResponse.json(
@@ -114,12 +137,19 @@ export async function POST(req: Request) {
     }
   }
 
-  // Budget cap.
-  const totals = await getSessionTotals(sessionId)
+  // Budget cap (per-user override, falling back to env default).
+  const totals = await getUserTotals(userId)
   const spent = Number(totals?.totalCostUsd ?? 0)
-  if (spent >= env.BUDGET_USD_PER_SESSION) {
+  const userBudget = totals?.budgetUsd != null ? Number(totals.budgetUsd) : NaN
+  const cap = Number.isFinite(userBudget) && userBudget > 0 ? userBudget : env.BUDGET_USD_PER_SESSION
+  if (spent >= cap) {
     return NextResponse.json(
-      { error: 'cap_exceeded', spent, cap: env.BUDGET_USD_PER_SESSION },
+      {
+        error: 'cap_exceeded',
+        message: `Budget cap reached ($${cap.toFixed(2)}). Raise it from the header or start a new chat.`,
+        spent,
+        cap,
+      },
       { status: 402 },
     )
   }
@@ -130,21 +160,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'no_user_message' }, { status: 400 })
   }
 
-  // Resolve conversation (own this session, create if missing).
+  // Resolve conversation (own by this user, create if missing).
   let conversationId = body.conversationId ?? null
   if (conversationId) {
-    const c = await getConversation(sessionId, conversationId)
+    const c = await getConversation(userId, conversationId)
     if (!c) conversationId = null
   }
   if (!conversationId) {
-    const c = await createConversation(sessionId)
+    const c = await createConversation(userId)
     conversationId = c.id
   }
 
   // Per-chat context cap (Cursor-style): summarize + open a fresh thread when full.
   let contextRotated = false
   let continuedFromId: string | undefined
-  const rotation = await rotateConversationIfNeeded(sessionId, conversationId)
+  const rotation = await rotateConversationIfNeeded(userId, conversationId)
   if (rotation.rotated) {
     contextRotated = true
     continuedFromId = rotation.continuedFromId
@@ -172,7 +202,7 @@ export async function POST(req: Request) {
   const fullHistory = dbMessagesToUIMessages(existing)
 
   // Carry forward get_details memory from the parent thread after context rotation.
-  const conv = await getConversation(sessionId, conversationId)
+  const conv = await getConversation(userId, conversationId)
   let guardHistory = fullHistory
   if (conv?.continuedFromConversationId) {
     const parentRows = await listMessages(conv.continuedFromConversationId)
@@ -237,7 +267,7 @@ export async function POST(req: Request) {
         }
 
         const turnTokens = inputTokens + outputTokens
-        await bumpSessionTotals(sessionId, totalCost, turnTokens)
+        await bumpUserTotals(userId, totalCost, turnTokens)
         await bumpConversationTokens(conversationId!, turnTokens)
         await touchConversation(conversationId!)
       } catch (err) {

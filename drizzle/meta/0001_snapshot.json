@@ -1,6 +1,6 @@
 {
-  "id": "3289bd0c-ced1-4852-b6d8-9d5ed34de7ff",
-  "prevId": "00000000-0000-0000-0000-000000000000",
+  "id": "5e2e1d75-2f75-40a0-88bc-0198e2b1248b",
+  "prevId": "3289bd0c-ced1-4852-b6d8-9d5ed34de7ff",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -359,6 +359,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "budget_usd": {
+          "name": "budget_usd",
+          "type": "numeric(10, 4)",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { fetchJson, isBenignFetchError } from '@/lib/fetch-json'
+import { fetchJson, isBenignFetchError, errorMessageFromFetch } from '@/lib/fetch-json'
 
 type Convo = { id: string; title: string | null; updatedAt: string }
 
@@ -23,6 +23,7 @@ export function Sidebar({
   refreshKey: number
 }) {
   const [items, setItems] = useState<Convo[]>([])
+  const [listError, setListError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
 
@@ -35,9 +36,15 @@ export function Sidebar({
           cache: 'no-store',
           signal: ac.signal,
         })
-        if (active) setItems(data.conversations ?? [])
+        if (active) {
+          setItems(data.conversations ?? [])
+          setListError(null)
+        }
       } catch (e) {
         if (!isBenignFetchError(e)) console.error('list conversations failed', e)
+        if (active && !isBenignFetchError(e)) {
+          setListError(errorMessageFromFetch(e) || 'Could not load conversations')
+        }
       }
     })()
     return () => {
@@ -77,9 +84,15 @@ export function Sidebar({
         </button>
       </div>
       <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        {items.length === 0 ? (
+        {listError ? (
+          <div className="px-2 py-3 text-xs text-red-600 dark:text-red-400" role="alert">
+            {listError}
+          </div>
+        ) : null}
+        {items.length === 0 && !listError ? (
           <div className="px-2 py-3 text-xs text-muted-foreground">No conversations yet</div>
-        ) : (
+        ) : null}
+        {items.length > 0 ? (
           <ul className="space-y-1">
             {visible.map((c) => {
               const isCurrent = currentId === c.id
@@ -113,7 +126,7 @@ export function Sidebar({
               )
             })}
           </ul>
-        )}
+        ) : null}
 
         {hidden > 0 && !expanded ? (
           <button

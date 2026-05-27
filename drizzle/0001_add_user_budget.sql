@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "budget_usd" numeric(10, 4);

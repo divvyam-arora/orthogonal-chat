@@ -1,7 +1,9 @@
 CREATE TABLE "conversations" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"session_id" uuid NOT NULL,
+	"user_id" text NOT NULL,
 	"title" text,
+	"total_tokens" integer DEFAULT 0 NOT NULL,
+	"continued_from_conversation_id" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -15,13 +17,6 @@ CREATE TABLE "messages" (
 	"output_tokens" integer,
 	"cost_usd" numeric(10, 6),
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE "sessions" (
-	"id" uuid PRIMARY KEY NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"total_cost_usd" numeric(10, 6) DEFAULT '0' NOT NULL,
-	"total_tokens" integer DEFAULT 0 NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "tool_results" (
@@ -38,9 +33,19 @@ CREATE TABLE "tool_results" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "conversations" ADD CONSTRAINT "conversations_session_id_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."sessions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE TABLE "users" (
+	"id" text PRIMARY KEY NOT NULL,
+	"email" text,
+	"name" text,
+	"image" text,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"total_cost_usd" numeric(10, 6) DEFAULT '0' NOT NULL,
+	"total_tokens" integer DEFAULT 0 NOT NULL
+);
+--> statement-breakpoint
+ALTER TABLE "conversations" ADD CONSTRAINT "conversations_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "messages" ADD CONSTRAINT "messages_conversation_id_conversations_id_fk" FOREIGN KEY ("conversation_id") REFERENCES "public"."conversations"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tool_results" ADD CONSTRAINT "tool_results_message_id_messages_id_fk" FOREIGN KEY ("message_id") REFERENCES "public"."messages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "conversations_session_updated_idx" ON "conversations" USING btree ("session_id","updated_at");--> statement-breakpoint
+CREATE INDEX "conversations_user_updated_idx" ON "conversations" USING btree ("user_id","updated_at");--> statement-breakpoint
 CREATE INDEX "messages_conversation_created_idx" ON "messages" USING btree ("conversation_id","created_at");--> statement-breakpoint
 CREATE INDEX "tool_results_message_idx" ON "tool_results" USING btree ("message_id");

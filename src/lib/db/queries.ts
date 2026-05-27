@@ -1,28 +1,57 @@
 import { eq, desc, and } from 'drizzle-orm'
 import { db } from '.'
-import { sessions, conversations, messages, toolResults } from './schema'
+import { users, conversations, messages, toolResults } from './schema'
 
-export async function upsertSession(sessionId: string) {
-  await db.insert(sessions).values({ id: sessionId }).onConflictDoNothing()
+export type UpsertUserInput = {
+  id: string
+  email?: string | null
+  name?: string | null
+  image?: string | null
 }
 
-export async function getSessionTotals(sessionId: string) {
-  const rows = await db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1)
+export async function upsertUser(u: UpsertUserInput) {
+  await db
+    .insert(users)
+    .values({
+      id: u.id,
+      email: u.email ?? null,
+      name: u.name ?? null,
+      image: u.image ?? null,
+    })
+    .onConflictDoUpdate({
+      target: users.id,
+      set: {
+        email: u.email ?? null,
+        name: u.name ?? null,
+        image: u.image ?? null,
+      },
+    })
+}
+
+export async function getUserTotals(userId: string) {
+  const rows = await db.select().from(users).where(eq(users.id, userId)).limit(1)
   return rows[0] ?? null
 }
 
-export async function bumpSessionTotals(sessionId: string, addCostUsd: number, addTokens: number) {
-  const current = await getSessionTotals(sessionId)
+export async function setUserBudget(userId: string, budgetUsd: number | null) {
+  await db
+    .update(users)
+    .set({ budgetUsd: budgetUsd === null ? null : budgetUsd.toFixed(4) })
+    .where(eq(users.id, userId))
+}
+
+export async function bumpUserTotals(userId: string, addCostUsd: number, addTokens: number) {
+  const current = await getUserTotals(userId)
   const newCost = Number(current?.totalCostUsd ?? 0) + addCostUsd
   const newTokens = (current?.totalTokens ?? 0) + addTokens
   await db
-    .update(sessions)
+    .update(users)
     .set({ totalCostUsd: newCost.toFixed(6), totalTokens: newTokens })
-    .where(eq(sessions.id, sessionId))
+    .where(eq(users.id, userId))
   return { totalCostUsd: newCost, totalTokens: newTokens }
 }
 
-export async function listConversations(sessionId: string) {
+export async function listConversations(userId: string) {
   return db
     .select({
       id: conversations.id,
@@ -33,7 +62,7 @@ export async function listConversations(sessionId: string) {
       createdAt: conversations.createdAt,
     })
     .from(conversations)
-    .where(eq(conversations.sessionId, sessionId))
+    .where(eq(conversations.userId, userId))
     .orderBy(desc(conversations.updatedAt))
 }
 
@@ -50,7 +79,7 @@ export async function bumpConversationTokens(conversationId: string, addTokens: 
 }
 
 export async function createContinuedConversation(opts: {
-  sessionId: string
+  userId: string
   continuedFromConversationId: string
   title: string
   summary: string
@@ -61,7 +90,7 @@ export async function createContinuedConversation(opts: {
   const [row] = await db
     .insert(conversations)
     .values({
-      sessionId: opts.sessionId,
+      userId: opts.userId,
       title: opts.title,
       continuedFromConversationId: opts.continuedFromConversationId,
       totalTokens: opts.summaryInputTokens + opts.summaryOutputTokens,
@@ -90,19 +119,19 @@ export async function createContinuedConversation(opts: {
   return row
 }
 
-export async function createConversation(sessionId: string) {
+export async function createConversation(userId: string) {
   const [row] = await db
     .insert(conversations)
-    .values({ sessionId })
+    .values({ userId })
     .returning({ id: conversations.id, title: conversations.title, createdAt: conversations.createdAt })
   return row
 }
 
-export async function getConversation(sessionId: string, conversationId: string) {
+export async function getConversation(userId: string, conversationId: string) {
   const rows = await db
     .select()
     .from(conversations)
-    .where(and(eq(conversations.id, conversationId), eq(conversations.sessionId, sessionId)))
+    .where(and(eq(conversations.id, conversationId), eq(conversations.userId, userId)))
     .limit(1)
   return rows[0] ?? null
 }
@@ -132,11 +161,11 @@ export async function touchConversation(conversationId: string, title?: string |
     .where(eq(conversations.id, conversationId))
 }
 
-export async function deleteConversation(sessionId: string, conversationId: string) {
+export async function deleteConversation(userId: string, conversationId: string) {
   // Schema cascades to messages + tool_results.
   const result = await db
     .delete(conversations)
-    .where(and(eq(conversations.id, conversationId), eq(conversations.sessionId, sessionId)))
+    .where(and(eq(conversations.id, conversationId), eq(conversations.userId, userId)))
     .returning({ id: conversations.id })
   return result[0] ?? null
 }
